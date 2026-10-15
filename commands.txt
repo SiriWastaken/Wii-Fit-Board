@@ -1,0 +1,7 @@
+sudo apt update && sudo apt install -y default-jdk bluez libudev1 libusb-1.0-0
+sudo systemctl enable --now bluetooth && rfkill unblock bluetooth
+echo 'KERNEL=="hidraw*", ATTRS{idVendor}=="057e", ATTRS{idProduct}=="0306", MODE="0660", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/99-wiiboard.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+mkdir -p out && javac -cp "lib/*" -d out src/*.java
+bluetoothctl  
+java -cp "out:lib/*" Main
