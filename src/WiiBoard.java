@@ -2,6 +2,9 @@ import org.hid4java.HidDevice;
 import org.hid4java.HidManager;
 import org.hid4java.HidServices;
 
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * Represents a Nintendo Wii Balance Board connected through HID.
  *
@@ -29,6 +32,15 @@ public class WiiBoard {
      * Wii Balance Board's product ID.
      */
     private static final int PRODUCT_ID = 0x0306;
+
+    /** Number of times connect() looks for the board before giving up. */
+    private static final int CONNECT_ATTEMPTS = 20;
+
+    /** Data report mode: buttons + 4 load-cell values. */
+    private static final byte REPORT_WEIGHT = 0x32;
+
+    /** Raw sensor values at 0, 17 and 34 kg for each of the 4 sensors. */
+    private int[][] calibration;
 
     /**
      * hid4java service manager.
@@ -63,29 +75,148 @@ public class WiiBoard {
      */
     public void connect() {
 
+        if (isConnected) {
+            return;
+        }
+
         hidServices = HidManager.getHidServices();
 
-        // Search for the Wii Balance Board using its VID and PID.
-        board = hidServices.getHidDevice(
-                VENDOR_ID,
-                PRODUCT_ID,
-                null);
+        /*
+         * hid4java enumerates devices in the background, so the board may
+         * not be listed right after startup. Rescan a few times and match on
+         * VID/PID ourselves (getHidDevice() with a null serial can miss it).
+         */
+        for (int attempt = 0; attempt < CONNECT_ATTEMPTS && board == null; attempt++) {
+            hidServices.scan();
+            for (HidDevice device : hidServices.getAttachedHidDevices()) {
+                String name = device.getProduct();
+                if ((device.getVendorId() == VENDOR_ID && device.getProductId() == PRODUCT_ID)
+                        || (name != null && name.contains("RVL-WBC"))) {
+                    board = device;
+                    break;
+                }
+            }
+            if (board == null) {
+                sleep(500);
+            }
+        }
 
         if (board == null) {
-            System.out.println("  ✗ Wii Balance Board not found.");
+            System.out.println("  ✗ Wii Balance Board not found. Press the red SYNC button"
+                    + " (battery bay), pair it in Bluetooth settings, then rerun.");
             return;
         }
 
         System.out.println("  Found: " + board.getProduct());
 
-        // Open the HID device so reports can be read.
-        if (!board.open()) {
-            System.out.println("  ✗ Could not open Wii Balance Board.");
+        // Opening can fail transiently right after the board connects, so retry.
+        boolean opened = false;
+        for (int i = 0; i < 5 && !opened; i++) {
+            opened = board.open();
+            if (!opened) {
+                sleep(500);
+            }
+        }
+        if (!opened) {
+            System.out.println("  ✗ Could not open Wii Balance Board"
+                    + " (macOS: grant Input Monitoring; Linux: hidraw permissions).");
             board = null;
             return;
         }
 
         isConnected = true;
+
+        // Without this the board only sends status reports, never weights.
+        board.write(new byte[] { 0x00, REPORT_WEIGHT }, 2, (byte) 0x12);
+
+        readCalibration();
+    }
+
+    /**
+     * Reads the factory calibration (0, 17 and 34 kg raw values per sensor)
+     * from the board. Falls back to uncalibrated if the board does not answer.
+     */
+    private void readCalibration() {
+        for (int round = 0; round < 3 && calibration == null; round++) {
+            requestCalibration();
+        }
+        if (calibration == null) {
+            System.out.println("  ! Calibration not received; weights will be unavailable.");
+        }
+    }
+
+    private void requestCalibration() {
+        // Enable the extension registers, then request 24 bytes at 0xA40024.
+        // Report 0x16 (write memory) must be its full 21 bytes, so pad with zeros.
+        board.write(Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xF0, 0x01, 0x55 }, 21), 21, (byte) 0x16);
+        board.write(Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xFB, 0x01, 0x00 }, 21), 21, (byte) 0x16);
+        board.write(new byte[] { 0x04, (byte) 0xA4, 0x00, 0x24, 0x00, 0x18 }, 6, (byte) 0x17);
+
+        // Replies (report 0x21) carry up to 16 data bytes each: 16 + 8.
+        int[][] cal = new int[3][4];
+        int got = 0;
+        for (int tries = 0; tries < 50 && got < 24; tries++) {
+            byte[] r = readReport();
+            if (r == null || r[0] != 0x21 || r.length < 6 + 8) {
+                continue;
+            }
+            int start = r[5] & 0xFF; // low byte of the data's address
+            int len = ((r[3] & 0xFF) >> 4) + 1;
+            for (int i = 0; i < len && start + i - 0x24 < 24; i++) {
+                int idx = start + i - 0x24;
+                int v = r[6 + i] & 0xFF;
+                // Each value is 16-bit big-endian; groups: 0 kg, 17 kg, 34 kg.
+                int word = idx / 2;
+                cal[word / 4][word % 4] |= (idx % 2 == 0) ? v << 8 : v;
+            }
+            got += len;
+        }
+        if (got >= 24) {
+            calibration = cal;
+        }
+    }
+
+    /**
+     * Decodes a raw HID report into total weight in kilograms.
+     *
+     * @param report bytes of one HID input report (report ID first)
+     * @return weight in kg, or {@code null} if the report holds no sensor
+     *         data or the board is not calibrated
+     */
+    public Double decodeWeight(List<Byte> report) {
+
+        if (calibration == null || report.isEmpty()) {
+            return null;
+        }
+
+        // Offset of the 8 sensor bytes: 0x32/0x34 after buttons, 0x35 after accel too.
+        int id = report.get(0) & 0xFF;
+        int offset = (id == 0x32 || id == 0x34) ? 3 : (id == 0x35) ? 6 : -1;
+        if (offset < 0 || report.size() < offset + 8) {
+            return null;
+        }
+
+        double total = 0;
+        for (int s = 0; s < 4; s++) {
+            int raw = ((report.get(offset + 2 * s) & 0xFF) << 8)
+                    | (report.get(offset + 2 * s + 1) & 0xFF);
+            int c0 = calibration[0][s], c17 = calibration[1][s], c34 = calibration[2][s];
+            if (c17 == c0 || c34 == c17) {
+                return null; // bad calibration data
+            }
+            total += raw < c17
+                    ? 17.0 * (raw - c0) / (c17 - c0)
+                    : 17.0 + 17.0 * (raw - c17) / (c34 - c17);
+        }
+        return total;
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
