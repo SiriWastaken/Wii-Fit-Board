@@ -1,2 +1,18 @@
-Setup, run and deployment instructions are in README.md.
-Quick start on Linux after pairing the board:   ./build.sh && java -jar dist/scale.jar
+# Linux setup (Debian/Ubuntu). See README.md for details.
+sudo apt update && sudo apt install -y default-jdk bluez
+sudo systemctl enable --now bluetooth && rfkill unblock bluetooth
+
+# hidraw permission (verified rule): lets the app open the board without root
+echo 'SUBSYSTEM=="hidraw", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wiiboard.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw --action=change
+
+# Pair once: press the RED sync button in the battery bay, then in bluetoothctl:
+#   power on / agent on / scan on / pair <MAC> / trust <MAC> / connect <MAC>
+bluetoothctl
+
+# Build, test, run
+./build.sh
+./test.sh
+java -cp "out:lib/*" Main
+# Per-second raw/total/Hz log on stderr:
+java -Dscale.debug=true -cp "out:lib/*" Main

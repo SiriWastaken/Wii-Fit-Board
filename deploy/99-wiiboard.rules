@@ -1,6 +1,0 @@
-# Lets the app open the Balance Board's hidraw node without root.
-# The kernel names Bluetooth HID devices <bus>:<VID>:<PID>.<n> = 0005:057E:0306.xxxx (Wii Remotes match too).
-# UNVERIFIED match; if `ls -l /dev/hidraw*` still shows root-only after reconnecting the board, use the
-# fallback below (this is the rule that was confirmed working on the Ubuntu test machine).
-SUBSYSTEM=="hidraw", KERNELS=="0005:057E:0306.*", MODE="0666"
-# SUBSYSTEM=="hidraw", MODE="0666"

@@ -1,4 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Wii Scale
-Exec=java -Xmx96m -Xss512k -jar /opt/wii-scale/scale.jar --config /opt/wii-scale/scale.properties

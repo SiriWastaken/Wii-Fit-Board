@@ -1,2 +1,0 @@
-Main-Class: Main
-Class-Path: lib/hid4java-0.8.0.jar lib/jna-5.17.0.jar lib/jna-platform-5.17.0.jar
