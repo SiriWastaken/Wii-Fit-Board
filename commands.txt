@@ -1,18 +1,2 @@
-# Copy-paste this whole block into the terminal, from the project folder.
-# Before you start: board must be paired + connected (bluetoothctl -> connect XX:XX:XX:XX:XX:XX).
-# My previous udev rule used the wrong id format (8-digit instead of 4-digit), so it never matched.
-# This one matches every hidraw device, so it can't miss.
-
-echo 'SUBSYSTEM=="hidraw", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wiiboard.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=hidraw --action=change
-sudo chmod 666 /dev/hidraw*
-ls -l /dev/hidraw*
-mkdir -p out && javac -cp "lib/*" -d out src/*.java
-java -cp "out:lib/*" Main
-
-# Every /dev/hidraw* line above should start with crw-rw-rw-.
-# If the program STILL says hidraw permissions, run it as root to confirm it's only permissions:
-#   sudo java -cp "out:lib/*" Main
-# If no /dev/hidraw* exists at all, the board isn't connected: re-press the red sync button,
-# run "bluetoothctl connect XX:XX:XX:XX:XX:XX", then rerun the block.
+Setup, run and deployment instructions are in README.md.
+Quick start on Linux after pairing the board:   ./build.sh && java -jar dist/scale.jar

@@ -2,293 +2,182 @@ import org.hid4java.HidDevice;
 import org.hid4java.HidManager;
 import org.hid4java.HidServices;
 
+import java.io.IOException;
 import java.util.Arrays;
-import java.util.List;
 
 /**
- * Represents a Nintendo Wii Balance Board connected through HID.
+ * HID access to a Nintendo Wii Balance Board (protocol per WiiBrew, "Wii Balance Board").
  *
  * <p>
- * This class is responsible for finding, opening, reading from, and
- * closing the Balance Board. Decoding the raw sensor reports into
- * weight measurements will be implemented separately.
+ * {@link #open()} finds the board, opens it, selects the sensor report mode and
+ * reads the factory calibration; it fails (and releases everything) unless all of
+ * that succeeds. {@link #read()} then returns calibrated samples.
  * </p>
- *
- * <p>
- * The Wii Balance Board uses Nintendo's USB vendor ID (VID) and
- * Balance Board product ID (PID) to identify the device.
- * </p>
- *
- * @author FRC Team 610
  */
-public class WiiBoard {
+public class WiiBoard implements SensorSource {
 
-    /**
-     * Nintendo's USB vendor ID.
-     */
+    /** Nintendo's vendor ID. */
     private static final int VENDOR_ID = 0x057E;
 
-    /**
-     * Wii Balance Board's product ID.
-     */
+    /** Product ID of the board. The Wii Remote uses the same one, so the name is checked too. */
     private static final int PRODUCT_ID = 0x0306;
 
-    /** Number of times connect() looks for the board before giving up. */
-    private static final int CONNECT_ATTEMPTS = 20;
+    /** Scans for the board this many times (500 ms apart) per open(); the engine does the long-term retrying. */
+    private static final int CONNECT_ATTEMPTS = 4;
 
-    /** Data report mode: buttons + 4 load-cell values. */
-    private static final byte REPORT_WEIGHT = 0x32;
+    private static final int READ_TIMEOUT_MS = 250;
 
-    /** Raw sensor values at 0, 17 and 34 kg for each of the 4 sensors. */
-    private int[][] calibration;
+    /** Output report 0x12: set data reporting mode. */
+    private static final byte REPORT_SET_MODE = 0x12;
 
-    /**
-     * hid4java service manager.
-     */
+    /** Continuous flag (0x04) so reports keep coming when the load is unchanged; mode 0x32 = buttons + 8 sensor bytes. */
+    private static final byte[] MODE_SENSORS_CONTINUOUS = { 0x04, 0x32 };
+
+    private static final int CALIBRATION_ADDRESS = 0x0024;
+
     private HidServices hidServices;
-
-    /**
-     * HID device representing the Wii Balance Board.
-     */
     private HidDevice board;
+    private Calibration calibration;
 
-    /**
-     * Whether the board is currently connected and open.
-     */
-    private boolean isConnected;
-
-    /**
-     * Creates a Wii Balance Board interface.
-     */
-    public WiiBoard() {
-        isConnected = false;
+    @Override
+    public void open() throws IOException {
+        try {
+            connect();
+        } catch (IOException e) {
+            close();
+            throw e;
+        } catch (RuntimeException | LinkageError e) {
+            close();
+            throw new IOException("HID error: " + e, e);
+        }
     }
 
-    /**
-     * Searches for the Wii Balance Board and opens it.
-     *
-     * <p>
-     * The board is identified using its USB vendor ID and product ID.
-     * If the board cannot be found or opened, {@link #isConnected}
-     * remains false.
-     * </p>
-     */
-    public void connect() {
-
-        if (isConnected) {
-            return;
-        }
-
+    private void connect() throws IOException {
         hidServices = HidManager.getHidServices();
 
-        /*
-         * hid4java enumerates devices in the background, so the board may
-         * not be listed right after startup. Rescan a few times and match on
-         * VID/PID ourselves (getHidDevice() with a null serial can miss it).
-         */
+        // hid4java enumerates in the background, so rescan until the board shows up.
         for (int attempt = 0; attempt < CONNECT_ATTEMPTS && board == null; attempt++) {
             hidServices.scan();
             for (HidDevice device : hidServices.getAttachedHidDevices()) {
-                String name = device.getProduct();
-                if ((device.getVendorId() == VENDOR_ID && device.getProductId() == PRODUCT_ID)
-                        || (name != null && name.contains("RVL-WBC"))) {
+                if (isBalanceBoard(device)) {
                     board = device;
                     break;
                 }
             }
             if (board == null) {
-                sleep(500);
+                pause(500);
             }
         }
-
         if (board == null) {
-            System.out.println("  ✗ Wii Balance Board not found. Press the red SYNC button"
-                    + " (battery bay), pair it in Bluetooth settings, then rerun.");
-            return;
+            throw new IOException("Board not found (press the red SYNC button, connect it in bluetoothctl)");
         }
-
-        System.out.println("  Found: " + board.getProduct());
+        Log.info("Found %s", board.getProduct());
 
         // Opening can fail transiently right after the board connects, so retry.
         boolean opened = false;
         for (int i = 0; i < 5 && !opened; i++) {
             opened = board.open();
             if (!opened) {
-                sleep(500);
+                pause(500);
             }
         }
         if (!opened) {
-            System.out.println("  ✗ Could not open Wii Balance Board"
-                    + " (macOS: grant Input Monitoring; Linux: hidraw permissions).");
-            board = null;
-            return;
+            throw new IOException("Could not open the board (Linux: hidraw permissions, see README)");
         }
 
-        isConnected = true;
-
-        // Without this the board only sends status reports, never weights.
-        board.write(new byte[] { 0x00, REPORT_WEIGHT }, 2, (byte) 0x12);
-
-        readCalibration();
+        send(REPORT_SET_MODE, MODE_SENSORS_CONTINUOUS);
+        calibration = readCalibration();
     }
 
-    /**
-     * Reads the factory calibration (0, 17 and 34 kg raw values per sensor)
-     * from the board. Falls back to uncalibrated if the board does not answer.
-     */
-    private void readCalibration() {
-        for (int round = 0; round < 3 && calibration == null; round++) {
-            requestCalibration();
-        }
-        if (calibration == null) {
-            System.out.println("  ! Calibration not received; weights will be unavailable.");
-        }
+    private static boolean isBalanceBoard(HidDevice d) {
+        String name = d.getProduct();
+        // Only the product name tells a Balance Board from a Wii Remote (same VID/PID).
+        return name != null
+                ? name.contains("RVL-WBC")
+                : d.getVendorId() == VENDOR_ID && d.getProductId() == PRODUCT_ID;
     }
 
-    private void requestCalibration() {
-        // Enable the extension registers, then request 24 bytes at 0xA40024.
+    private Calibration readCalibration() throws IOException {
+        for (int round = 0; round < 3; round++) {
+            byte[] mem = requestCalibration();
+            if (mem != null) {
+                try {
+                    return Calibration.fromBytes(mem);
+                } catch (IllegalArgumentException e) {
+                    throw new IOException(e.getMessage(), e);
+                }
+            }
+        }
+        throw new IOException("No calibration data received from the board");
+    }
+
+    private byte[] requestCalibration() throws IOException {
+        // Enable the extension registers, then read 24 bytes at 0xA40024.
         // Report 0x16 (write memory) must be its full 21 bytes, so pad with zeros.
-        board.write(Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xF0, 0x01, 0x55 }, 21), 21, (byte) 0x16);
-        board.write(Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xFB, 0x01, 0x00 }, 21), 21, (byte) 0x16);
-        board.write(new byte[] { 0x04, (byte) 0xA4, 0x00, 0x24, 0x00, 0x18 }, 6, (byte) 0x17);
+        send((byte) 0x16, Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xF0, 0x01, 0x55 }, 21));
+        send((byte) 0x16, Arrays.copyOf(new byte[] { 0x04, (byte) 0xA4, 0x00, (byte) 0xFB, 0x01, 0x00 }, 21));
+        send((byte) 0x17, new byte[] { 0x04, (byte) 0xA4, 0x00, 0x24, 0x00, Calibration.BYTES });
 
-        // Replies (report 0x21) carry up to 16 data bytes each: 16 + 8.
-        int[][] cal = new int[3][4];
-        int got = 0;
-        for (int tries = 0; tries < 50 && got < 24; tries++) {
-            byte[] r = readReport();
-            if (r == null || r[0] != 0x21 || r.length < 6 + 8) {
-                continue;
+        // Replies carry up to 16 data bytes each: 16 + 8.
+        byte[] mem = new byte[Calibration.BYTES];
+        boolean[] seen = new boolean[Calibration.BYTES];
+        for (int tries = 0; tries < 50; tries++) {
+            Reports.copyMemoryReply(readRaw(), CALIBRATION_ADDRESS, mem, seen);
+            boolean complete = true;
+            for (boolean s : seen) {
+                complete &= s;
             }
-            int start = r[5] & 0xFF; // low byte of the data's address
-            int len = ((r[3] & 0xFF) >> 4) + 1;
-            for (int i = 0; i < len && start + i - 0x24 < 24; i++) {
-                int idx = start + i - 0x24;
-                int v = r[6 + i] & 0xFF;
-                // Each value is 16-bit big-endian; groups: 0 kg, 17 kg, 34 kg.
-                int word = idx / 2;
-                cal[word / 4][word % 4] |= (idx % 2 == 0) ? v << 8 : v;
+            if (complete) {
+                return mem;
             }
-            got += len;
         }
-        if (got >= 24) {
-            calibration = cal;
+        return null;
+    }
+
+    private void send(byte reportId, byte[] data) throws IOException {
+        if (board.write(data, data.length, reportId) < 0) {
+            throw new IOException("HID write failed (report 0x" + Integer.toHexString(reportId & 0xFF) + ")");
         }
     }
 
-    /**
-     * Decodes a raw HID report into total weight in kilograms.
-     *
-     * @param report bytes of one HID input report (report ID first)
-     * @return weight in kg, or {@code null} if the report holds no sensor
-     *         data or the board is not calibrated
-     */
-    public Double decodeWeight(List<Byte> report) {
-
-        if (calibration == null || report.isEmpty()) {
-            return null;
+    /** @return the next report as received, or {@code null} on timeout */
+    private byte[] readRaw() throws IOException {
+        byte[] buffer = new byte[64];
+        int n = board.read(buffer, READ_TIMEOUT_MS);
+        if (n < 0) {
+            throw new IOException("HID read failed");
         }
-
-        // Offset of the 8 sensor bytes: 0x32/0x34 after buttons, 0x35 after accel too.
-        int id = report.get(0) & 0xFF;
-        int offset = (id == 0x32 || id == 0x34) ? 3 : (id == 0x35) ? 6 : -1;
-        if (offset < 0 || report.size() < offset + 8) {
-            return null;
-        }
-
-        double total = 0;
-        for (int s = 0; s < 4; s++) {
-            int raw = ((report.get(offset + 2 * s) & 0xFF) << 8)
-                    | (report.get(offset + 2 * s + 1) & 0xFF);
-            int c0 = calibration[0][s], c17 = calibration[1][s], c34 = calibration[2][s];
-            if (c17 == c0 || c34 == c17) {
-                return null; // bad calibration data
-            }
-            total += raw < c17
-                    ? 17.0 * (raw - c0) / (c17 - c0)
-                    : 17.0 + 17.0 * (raw - c17) / (c34 - c17);
-        }
-        return total;
+        return n == 0 ? null : Arrays.copyOf(buffer, n);
     }
 
-    private static void sleep(long ms) {
+    @Override
+    public Sample read() throws IOException {
+        if (board == null || calibration == null) {
+            throw new IOException("Board is not open");
+        }
+        int[] raw = Reports.sensors(readRaw());
+        return raw == null ? null : new Sample(raw, calibration.toKg(raw));
+    }
+
+    private static void pause(long ms) throws IOException {
         try {
             Thread.sleep(ms);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new IOException("Interrupted");
         }
     }
 
-    /**
-     * Reads the next HID input report from the Balance Board.
-     *
-     * <p>
-     * This method currently returns the raw bytes exactly as received.
-     * The report decoder will eventually convert these bytes into the
-     * four load-cell measurements used to calculate weight.
-     * </p>
-     *
-     * @return raw HID report, or {@code null} if no report was received
-     */
-    public byte[] readReport() {
-
-        if (!isConnected || board == null) {
-            throw new IllegalStateException("Board is not connected.");
-        }
-
-        /*
-         * HID reports from the Balance Board are small, so a 64-byte
-         * buffer is more than sufficient for the reports we expect.
-         */
-        byte[] buffer = new byte[64];
-
-        // Wait up to one second for an input report.
-        int bytesRead = board.read(buffer, 1000);
-
-        if (bytesRead <= 0) {
-            return null;
-        }
-
-        /*
-         * The buffer may be larger than the actual report, so return
-         * only the bytes that were actually received.
-         */
-        byte[] report = new byte[bytesRead];
-
-        System.arraycopy(
-                buffer,
-                0,
-                report,
-                0,
-                bytesRead);
-
-        return report;
-    }
-
-    /**
-     * Closes the Wii Balance Board and releases hid4java resources.
-     */
-    public void disconnect() {
-
+    @Override
+    public void close() {
         if (board != null) {
             board.close();
             board = null;
         }
-
         if (hidServices != null) {
             hidServices.shutdown();
             hidServices = null;
         }
-
-        isConnected = false;
-    }
-
-    /**
-     * Checks whether the Wii Balance Board is currently connected.
-     *
-     * @return {@code true} if the board is connected and open
-     */
-    public boolean isConnected() {
-        return isConnected;
+        calibration = null;
     }
 }

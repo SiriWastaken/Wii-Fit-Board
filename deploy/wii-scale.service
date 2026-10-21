@@ -1,0 +1,18 @@
+[Unit]
+Description=Wii Balance Board scale (headless)
+After=bluetooth.service
+Wants=bluetooth.service
+# Give up after 5 failed starts in 5 minutes instead of looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=scale
+WorkingDirectory=/opt/wii-scale
+ExecStart=/usr/bin/java -Xmx96m -Xss512k -jar /opt/wii-scale/scale.jar --headless --config /opt/wii-scale/scale.properties
+# The app reconnects to the board by itself; this only restarts a crashed JVM.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
