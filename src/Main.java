@@ -27,6 +27,11 @@ public class Main {
     /** Fraction of the remaining distance the number moves each 16 ms frame. */
     private static final double EASING = 0.12;
 
+    private static final float REFERENCE_PX = 100f;
+    private static final float MIN_PX = 12f;
+    private static final int MARGIN_PX = 16;
+    /** Unit labels and the kg line are drawn at these fractions of the pound number's size. */
+    private static final double UNIT_SCALE = 0.3, KG_SCALE = 0.32;
     private static final double LB_PER_KG = 2.20462262185;
     /** How long a result stays on screen after the person steps off. */
     private static final long HOLD_MS = 15_000;
@@ -180,12 +185,8 @@ public class Main {
                 return;
             }
             status.setText(board.status());
-            float px = Math.max(40f, frame.getHeight() * 0.28f);
-            if (px != fontPx[0]) {
-                weight.setFont(weight.getFont().deriveFont(px));
-                fontPx[0] = px;
-            }
             if (state == WiiBoard.State.OFFLINE || state == WiiBoard.State.ZEROING) {
+                setSize(weight, "--", "", fontPx);
                 weight.setForeground(MUTED);
                 weight.setText("--");
                 return;
@@ -193,13 +194,37 @@ public class Main {
             double target = blank[0] ? 0 : !Double.isNaN(held[0]) ? held[0] : board.liveKg();
             shownKg[0] += ((target < DEADBAND_KG ? 0 : target) - shownKg[0]) * EASING;
             double kg = Math.max(0, shownKg[0]);
+            String lbText = String.format("%.1f", kg * LB_PER_KG);
+            String kgText = String.format("%.1f kg", kg);
+            float px = setSize(weight, lbText + " lb", kgText, fontPx);
             weight.setForeground(INK);
-            weight.setText(String.format("<html><center>%.1f<span style='font-size:%dpx;color:#6E6E6A'> lb</span>"
-                    + "<br><span style='font-size:%dpx;color:#6E6E6A'>%.1f kg</span></center></html>",
-                    kg * LB_PER_KG, (int) (px * 0.3), (int) (px * 0.32), kg));
+            weight.setText(String.format("<html><center>%s<span style='font-size:%dpx;color:#6E6E6A'> lb</span>"
+                    + "<br><span style='font-size:%dpx;color:#6E6E6A'>%s</span></center></html>",
+                    lbText, (int) (px * UNIT_SCALE), (int) (px * KG_SCALE), kgText));
         }).start();
 
         frame.setVisible(true);
+    }
+
+    /**
+     * Picks the largest font that fits both lines in the label (width and height), so long numbers
+     * shrink instead of being clipped, whatever the window or history panel width.
+     */
+    private static float setSize(JLabel label, String lbLine, String kgLine, float[] last) {
+        // Line widths scale linearly with font size, so measure at a reference size and divide.
+        FontMetrics fm = label.getFontMetrics(label.getFont().deriveFont(REFERENCE_PX));
+        String number = lbLine.endsWith(" lb") ? lbLine.substring(0, lbLine.length() - 3) : lbLine;
+        double lbWidth = fm.stringWidth(number) + (lbLine.equals(number) ? 0 : UNIT_SCALE * fm.stringWidth(" lb"));
+        double kgWidth = KG_SCALE * fm.stringWidth(kgLine);
+        double perPx = Math.max(lbWidth, kgWidth) / REFERENCE_PX;
+        double byWidth = (label.getWidth() - 2 * MARGIN_PX) / Math.max(perPx, 0.01);
+        double byHeight = label.getHeight() * (kgLine.isEmpty() ? 0.7 : 0.5);
+        float px = (float) Math.max(MIN_PX, Math.min(byWidth, byHeight));
+        if (Math.abs(px - last[0]) >= 0.5f) {
+            label.setFont(label.getFont().deriveFont(px));
+            last[0] = px;
+        }
+        return px;
     }
 
     private static String describe(double kg) {
