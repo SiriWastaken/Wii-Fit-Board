@@ -1,37 +1,18 @@
-# Fresh Linux (Debian/Ubuntu) setup for the Wii Balance Board project.
-# Run from the project folder.
+# Copy-paste this whole block into the terminal, from the project folder.
+# Before you start: board must be paired + connected (bluetoothctl -> connect XX:XX:XX:XX:XX:XX).
+# My previous udev rule used the wrong id format (8-digit instead of 4-digit), so it never matched.
+# This one matches every hidraw device, so it can't miss.
 
-# 1. Install Java + Bluetooth (hid4java bundles its own hidraw/libusb natives)
-sudo apt update && sudo apt install -y default-jdk bluez libudev1 libusb-1.0-0
-sudo systemctl enable --now bluetooth && rfkill unblock bluetooth
-
-# 2. Fix "could not open ... hidraw permissions".
-#    The board is Bluetooth, so the old ATTRS{idVendor} rule never matched
-#    (that attribute only exists on USB devices). Match the Bluetooth HID id instead.
-#    Bluetooth HID id format: 0005:<VID>:<PID>.<n>  -> 0005:0000057E:00000306
-echo 'KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:0000057E:00000306.*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wiiboard.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# 3. Pair the board (do this AFTER the rule is installed).
-#    Press the RED sync button inside the battery cover (do not just press the power button).
-#    In bluetoothctl run these one at a time, with the sync LED still blinking:
-bluetoothctl
-#   power on
-#   agent on
-#   scan on                 (wait for "Nintendo RVL-WBC-01" and note its MAC address)
-#   pair   XX:XX:XX:XX:XX:XX    (if it asks for a PIN, press Enter / try 0000; if pairing fails, just use "connect")
-#   trust  XX:XX:XX:XX:XX:XX
-#   connect XX:XX:XX:XX:XX:XX
-#   exit
-# The board can drop after a few seconds; if so re-press the red sync button and run
-# "connect XX:XX:XX:XX:XX:XX" again, then immediately start the program.
-
-# 4. Check the permissions worked (the board must be connected first)
-ls -l /dev/hidraw*          # the board's node should show crw-rw-rw-
-# If it still says permission denied, re-plug/reconnect the board so the rule applies to the new node.
-# Quick temporary fix instead of the rule (resets on reconnect):
-#   sudo chmod 666 /dev/hidraw*
-
-# 5. Build and run
+echo 'SUBSYSTEM=="hidraw", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wiiboard.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=hidraw --action=change
+sudo chmod 666 /dev/hidraw*
+ls -l /dev/hidraw*
 mkdir -p out && javac -cp "lib/*" -d out src/*.java
 java -cp "out:lib/*" Main
+
+# Every /dev/hidraw* line above should start with crw-rw-rw-.
+# If the program STILL says hidraw permissions, run it as root to confirm it's only permissions:
+#   sudo java -cp "out:lib/*" Main
+# If no /dev/hidraw* exists at all, the board isn't connected: re-press the red sync button,
+# run "bluetoothctl connect XX:XX:XX:XX:XX:XX", then rerun the block.
