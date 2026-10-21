@@ -41,6 +41,12 @@ public final class Calibration {
         return new Calibration(p);
     }
 
+    @Override
+    public String toString() {
+        return "0kg=" + java.util.Arrays.toString(points[0]) + " 17kg=" + java.util.Arrays.toString(points[1])
+                + " 34kg=" + java.util.Arrays.toString(points[2]);
+    }
+
     /** @return per-sensor load in kg for four raw sensor values */
     public double[] toKg(int[] raw) {
         double[] kg = new double[SENSORS];

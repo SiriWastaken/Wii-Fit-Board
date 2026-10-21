@@ -98,17 +98,22 @@ public class WiiBoard implements SensorSource {
     }
 
     private Calibration readCalibration() throws IOException {
-        for (int round = 0; round < 3; round++) {
+        // Read twice and require identical bytes: a garbled read would otherwise skew every weight until reconnect.
+        byte[] previous = null;
+        for (int round = 0; round < 5; round++) {
             byte[] mem = requestCalibration();
-            if (mem != null) {
+            if (mem != null && Arrays.equals(mem, previous)) {
                 try {
-                    return Calibration.fromBytes(mem);
+                    Calibration c = Calibration.fromBytes(mem);
+                    Log.info("Calibration: %s", c);
+                    return c;
                 } catch (IllegalArgumentException e) {
                     throw new IOException(e.getMessage(), e);
                 }
             }
+            previous = mem;
         }
-        throw new IOException("No calibration data received from the board");
+        throw new IOException("No consistent calibration data received from the board");
     }
 
     private byte[] requestCalibration() throws IOException {
