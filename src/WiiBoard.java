@@ -415,9 +415,9 @@ public class WiiBoard {
         if (DEBUG) {
             rateCount++;
             if (t - rateStartMs >= 1000) {
-                log("%.1f Hz reports=%d dropped=%d calibrationReads=%d state=%s raw=%s total=%.3f kg",
+                log("%.1f Hz reports=%d dropped=%d calReads=%d state=%s raw=%s total=%.3f held=%.3f baseline=%.3f live=%.3f",
                         rateCount * 1000.0 / (t - rateStartMs), reports, dropped, calibrationReads, state,
-                        Arrays.toString(raw), total);
+                        Arrays.toString(raw), total, heldKg, baselineKg, liveKg);
                 rateCount = 0;
                 rateStartMs = t;
             }
